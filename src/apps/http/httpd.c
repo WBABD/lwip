@@ -125,6 +125,7 @@
 #if LWIP_HTTPD_SUPPORT_WEBSOCKETS
 #define HTTPD_UPGRADE_WebSockets "Upgrade: websocket"
 #define HTTPD_UPGRADE_WebSockets2 "Upgrade: Websocket"
+
 #endif
 
 #if LWIP_HTTPD_DYNAMIC_FILE_READ
@@ -261,7 +262,9 @@ struct http_state {
 #endif /* LWIP_HTTPD_DYNAMIC_FILE_READ */
   u32_t left;       /* Number of unsent bytes in buf. */
   u8_t retries;
-  u8_t websocket; /* 1 = Websocket, 0 = normal socket
+#if LWIP_HTTPD_SUPPORT_WEBSOCKETS
+  u8_t websocket; /* 1 = Websocket, 0 = normal socket */
+#endif
 #if LWIP_HTTPD_SUPPORT_11_KEEPALIVE
   u8_t keepalive;
 #endif /* LWIP_HTTPD_SUPPORT_11_KEEPALIVE */
@@ -320,7 +323,7 @@ static u8_t http_check_eof(struct altcp_pcb *pcb, struct http_state *hs);
 static void http_continue(void *connection);
 #endif /* LWIP_HTTPD_FS_ASYNC_READ */
 #if LWIP_HTTPD_SUPPORT_WEBSOCKETS
- static void * (char * data, size_t size) httpd_websocket_handler;
+ static void (* httpd_websocket_handler)(char * data, size_t size);
 #endif
 
 #if LWIP_HTTPD_SSI
@@ -419,6 +422,30 @@ http_kill_oldest_connection(u8_t ssi_required)
 #define http_remove_connection(hs)
 
 #endif /* LWIP_HTTPD_KILL_OLD_ON_CONNECTIONS_EXCEEDED */
+
+#if LWIP_HTTPD_SUPPORT_WEBSOCKETS
+static err_t
+http_websocket_request(struct pbuf* inp, struct http_state* hs,
+    char* data, u16_t data_len, char* uri, char* uri_end);
+
+//Reference to open websocket connection
+/** \brief Websocket frame header type*/
+#define WS_MASK_L 0x4 /**< \brief Length of MASK field in WebSocket Header*/
+/* Inspiration for this came from https://github.com/ThomasBarth/WebSockets-on-the-ESP32/blob/master/main/WebSocket_Task.c*/
+typedef struct
+{
+  uint8_t opcode : WS_MASK_L;
+  uint8_t reserved : 3;
+  uint8_t FIN : 1;
+  uint8_t payload_length : 7;
+  uint8_t mask : 1;
+} WS_frame_header_t;
+
+const char WS_sec_WS_keys[] = "Sec-WebSocket-Key:";
+const char WS_sec_conKey[] = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const char WS_srv_hs[] = "HTTP/1.1 101 Switching Protocols \r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: %.*s\r\n\r\n";
+
+#endif
 
 #if LWIP_HTTPD_SSI
 /** Allocate as struct http_ssi_state. */
@@ -2119,8 +2146,9 @@ http_parse_request(struct pbuf *inp, struct http_state *hs, struct altcp_pcb *pc
 #if LWIP_HTTPD_SUPPORT_WEBSOCKETS
           if(hs->websocket)
           {
+            struct pbuf* q = hs->req;
             /* We won't send data  */
-              return ERR_OK;
+            return http_websocket_request(q, hs, data, data_len, uri, sp2);
           }
 
 #endif
@@ -2760,12 +2788,13 @@ httpd_inits(struct altcp_tls_config *conf)
  * @param handler Handler that will deal with received data
  *
  */
-void http_set_websocket_handler(void * handler(char *data, size_t size))
+void http_set_websocket_handler(void (* handler)(char *data, size_t size))
 {
   LWIP_DEBUGF(HTTPD_DEBUG, ("http websocket handler\n"));
   LWIP_ASSERT("no websocket handler given", handler != NULL);
   httpd_websocket_handler = handler;
 }
+#endif
 
 #if LWIP_HTTPD_SSI
 /**
@@ -2818,8 +2847,32 @@ http_set_cgi_handlers(const tCGI *cgis, int num_handlers)
 
 #endif /* LWIP_TCP && LWIP_CALLBACK_API */
 #ifdef LWIP_HTTPD_SUPPORT_WEBSOCKETS
+
+/** Handle a post request. Called from http_parse_request when method 'POST'
+ * is found.
+ *
+ * @param p The input pbuf (containing the POST header and body).
+ * @param hs The http connection state.
+ * @param data HTTP request (header and part of body) from input pbuf(s).
+ * @param data_len Size of 'data'.
+ * @param uri The HTTP URI parsed from input pbuf(s).
+ * @param uri_end Pointer to the end of 'uri' (here, the rest of the HTTP
+ *                header starts).
+ * @return ERR_OK: POST correctly parsed and accepted by the application.
+ *         ERR_INPROGRESS: POST not completely parsed (no error yet)
+ *         another err_t: Error parsing POST or denied by the application
+ */
 static err_t
-http_post_httpd(struct http_state *hs, struct pbuf *p)
+http_websocket_request(struct pbuf* inp, struct http_state* hs,
+    char* data, u16_t data_len, char* uri, char* uri_end)
+
+{
+  
+  return ERR_OK;
+}
+
+static err_t
+http_websocket_httpd(struct http_state *hs, struct pbuf *p)
 {
   err_t err;
 
