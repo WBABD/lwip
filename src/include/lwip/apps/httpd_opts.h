@@ -257,6 +257,10 @@
 #if !defined LWIP_HTTPD_SUPPORT_11_KEEPALIVE || defined __DOXYGEN__
 #define LWIP_HTTPD_SUPPORT_11_KEEPALIVE     0
 #endif
+/* Set this to one to enable Websocket Support */
+#if !defined LWIP_HTTPD_SUPPORT_WEBSOCKETS || defined __DOXYGEN__
+#define LWIP_HTTPD_SUPPORT_WEBSOCKETS       1
+#endif
 
 /** Set this to 1 to support HTTP request coming in in multiple packets/pbufs */
 #if !defined LWIP_HTTPD_SUPPORT_REQUESTLIST || defined __DOXYGEN__

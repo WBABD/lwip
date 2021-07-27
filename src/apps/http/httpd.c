@@ -122,6 +122,10 @@
 #define HTTP11_CONNECTIONKEEPALIVE  "Connection: keep-alive"
 #define HTTP11_CONNECTIONKEEPALIVE2 "Connection: Keep-Alive"
 #endif
+#if LWIP_HTTPD_SUPPORT_WEBSOCKETS
+#define HTTPD_UPGRADE_WebSockets "Upgrade: websocket"
+#define HTTPD_UPGRADE_WebSockets2 "Upgrade: Websocket"
+#endif
 
 #if LWIP_HTTPD_DYNAMIC_FILE_READ
 #define HTTP_IS_DYNAMIC_FILE(hs) ((hs)->buf != NULL)
@@ -257,6 +261,7 @@ struct http_state {
 #endif /* LWIP_HTTPD_DYNAMIC_FILE_READ */
   u32_t left;       /* Number of unsent bytes in buf. */
   u8_t retries;
+  u8_t websocket; /* 1 = Websocket, 0 = normal socket
 #if LWIP_HTTPD_SUPPORT_11_KEEPALIVE
   u8_t keepalive;
 #endif /* LWIP_HTTPD_SUPPORT_11_KEEPALIVE */
@@ -314,6 +319,9 @@ static u8_t http_check_eof(struct altcp_pcb *pcb, struct http_state *hs);
 #if LWIP_HTTPD_FS_ASYNC_READ
 static void http_continue(void *connection);
 #endif /* LWIP_HTTPD_FS_ASYNC_READ */
+#if LWIP_HTTPD_SUPPORT_WEBSOCKETS
+ static void * (char * data, size_t size) httpd_websocket_handler;
+#endif
 
 #if LWIP_HTTPD_SSI
 /* SSI insert handler function pointer. */
@@ -2093,11 +2101,29 @@ http_parse_request(struct pbuf *inp, struct http_state *hs, struct altcp_pcb *pc
             hs->keepalive = 0;
           }
 #endif /* LWIP_HTTPD_SUPPORT_11_KEEPALIVE */
+
+#if LWIP_HTTPD_SUPPORT_WEBSOCKETS
+            if (!is_09 && (lwip_strnstr(data, HTTPD_UPGRADE_WebSockets, data_len) ||
+                         lwip_strnstr(data, HTTPD_UPGRADE_WebSockets2, data_len))) {
+            LWIP_DEBUGF(HTTPD_DEBUG, ("Received Web Socket Request"));
+            hs->websocket = 1;
+          } else {
+            hs->websocket = 0;
+          }
+#endif
           /* null-terminate the METHOD (pbuf is freed anyway wen returning) */
           *sp1 = 0;
           uri[uri_len] = 0;
           LWIP_DEBUGF(HTTPD_DEBUG, ("Received \"%s\" request for URI: \"%s\"\n",
                                     data, uri));
+#if LWIP_HTTPD_SUPPORT_WEBSOCKETS
+          if(hs->websocket)
+          {
+            /* We won't send data  */
+              return ERR_OK;
+          }
+
+#endif
 #if LWIP_HTTPD_SUPPORT_POST
           if (is_post) {
 #if LWIP_HTTPD_SUPPORT_REQUESTLIST
@@ -2598,8 +2624,16 @@ http_recv(void *arg, struct altcp_pcb *pcb, struct pbuf *p, err_t err)
 #endif /* LWIP_HTTPD_SUPPORT_REQUESTLIST */
       pbuf_free(p);
       if (parsed == ERR_OK) {
+#if LWIP_HTTPD_SUPPORT_WEBSOCKETS
+        if(hs->websocket == 1)
+        {
+            /* Don't do anything here */
+            LWIP_DEBUGF(HTTPD_DEBUG | LWIP_DBG_TRACE, ("HTTP Received Websocket request:"));
+        }
+        else
+#endif
 #if LWIP_HTTPD_SUPPORT_POST
-        if (hs->post_content_len_left == 0)
+        if (hs->post_content_len_left == 0   )
 #endif /* LWIP_HTTPD_SUPPORT_POST */
         {
           LWIP_DEBUGF(HTTPD_DEBUG | LWIP_DBG_TRACE, ("http_recv: data %p len %"S32_F"\n", (const void *)hs->file, hs->left));
@@ -2718,6 +2752,21 @@ httpd_inits(struct altcp_tls_config *conf)
 }
 #endif /* HTTPD_ENABLE_HTTPS */
 
+#if LWIP_HTTPD_SUPPORT_WEBSOCKETS
+/**
+ * @ingroup httpd
+ * Set the websocket handler
+ *
+ * @param handler Handler that will deal with received data
+ *
+ */
+void http_set_websocket_handler(void * handler(char *data, size_t size))
+{
+  LWIP_DEBUGF(HTTPD_DEBUG, ("http websocket handler\n"));
+  LWIP_ASSERT("no websocket handler given", handler != NULL);
+  httpd_websocket_handler = handler;
+}
+
 #if LWIP_HTTPD_SSI
 /**
  * @ingroup httpd
@@ -2768,3 +2817,46 @@ http_set_cgi_handlers(const tCGI *cgis, int num_handlers)
 #endif /* LWIP_HTTPD_CGI */
 
 #endif /* LWIP_TCP && LWIP_CALLBACK_API */
+#ifdef LWIP_HTTPD_SUPPORT_WEBSOCKETS
+static err_t
+http_post_httpd(struct http_state *hs, struct pbuf *p)
+{
+  err_t err;
+
+  if (p != NULL) {
+    /* adjust remaining Content-Length */
+    if (hs->post_content_len_left < p->tot_len) {
+      hs->post_content_len_left = 0;
+    } else {
+      hs->post_content_len_left -= p->tot_len;
+    }
+  }
+#if LWIP_HTTPD_SUPPORT_POST && LWIP_HTTPD_POST_MANUAL_WND
+  /* prevent connection being closed if httpd_post_data_recved() is called nested */
+  hs->unrecved_bytes++;
+#endif
+  if (p != NULL) {
+    err = httpd_post_receive_data(hs, p);
+  } else {
+    err = ERR_OK;
+  }
+#if LWIP_HTTPD_SUPPORT_POST && LWIP_HTTPD_POST_MANUAL_WND
+  hs->unrecved_bytes--;
+#endif
+  if (err != ERR_OK) {
+    /* Ignore remaining content in case of application error */
+    hs->post_content_len_left = 0;
+  }
+  if (hs->post_content_len_left == 0) {
+#if LWIP_HTTPD_SUPPORT_POST && LWIP_HTTPD_POST_MANUAL_WND
+    if (hs->unrecved_bytes != 0) {
+      return ERR_OK;
+    }
+#endif /* LWIP_HTTPD_SUPPORT_POST && LWIP_HTTPD_POST_MANUAL_WND */
+    /* application error or POST finished */
+    return http_handle_post_finished(hs);
+  }
+
+  return ERR_OK;
+}
+#endif
